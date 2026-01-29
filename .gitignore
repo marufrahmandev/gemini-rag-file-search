@@ -33,6 +33,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# file search cache (stores file search store name)
+.file-search-cache.json
+
 # vercel
 .vercel
 

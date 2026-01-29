@@ -8,41 +8,96 @@ const ai = new GoogleGenAI({
     apiKey: process.env.GEMINI_API_KEY
 });
 
+const STORE_DISPLAY_NAME = 'ai-knowledge-base-store';
+const FILE_DISPLAY_NAME = 'ai-knowledge-base';
+const CACHE_FILE = path.join(__dirname, '.file-search-cache.json');
+
+/**
+ * Get cached store name from file
+ */
+function getCachedStoreName() {
+    if (fs.existsSync(CACHE_FILE)) {
+        try {
+            const cacheData = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+            return cacheData.fileSearchStoreName || null;
+        } catch (error) {
+            console.log('⚠️  Cache file corrupted, will create new one');
+            return null;
+        }
+    }
+    return null;
+}
+
+/**
+ * Save store name to cache file
+ */
+function saveCachedStoreName(storeName) {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify({ fileSearchStoreName: storeName }, null, 2));
+}
+
+/**
+ * Wait for operation to complete
+ */
+async function waitForOperation(operation) {
+    while (!operation.done) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        operation = await ai.operations.get({ operation });
+        process.stdout.write('.');
+    }
+    return operation;
+}
+
+/**
+ * Get or create file search store and ensure file is indexed
+ * Uses cached store name from file to skip indexing on subsequent runs
+ */
+async function getOrCreateFileSearchStore() {
+    const sampleFilePath = path.join(__dirname, 'sample.txt');
+
+    if (!fs.existsSync(sampleFilePath)) {
+        throw new Error(`Sample file not found at ${sampleFilePath}`);
+    }
+
+    // Check if we have cached store name
+    const cachedStoreName = getCachedStoreName();
+    if (cachedStoreName) {
+        console.log('✅ Using cached file search store');
+        console.log(`📦 Store: ${cachedStoreName}\n`);
+        return cachedStoreName;
+    }
+
+    // First time - create store and index
+    console.log('📦 Creating file search store...');
+    const fileSearchStore = await ai.fileSearchStores.create({
+        config: { displayName: STORE_DISPLAY_NAME }
+    });
+    console.log(`✅ File search store created: ${fileSearchStore.name}\n`);
+
+    console.log('📤 Uploading sample.txt to file search store...');
+    let operation = await ai.fileSearchStores.uploadToFileSearchStore({
+        file: sampleFilePath,
+        fileSearchStoreName: fileSearchStore.name,
+        config: {
+            displayName: FILE_DISPLAY_NAME,
+        }
+    });
+
+    console.log('⏳ Waiting for file indexing to complete...');
+    await waitForOperation(operation);
+    console.log('\n✅ File indexed successfully!\n');
+
+    // Cache the store name to file
+    saveCachedStoreName(fileSearchStore.name);
+
+    return fileSearchStore.name;
+}
+
 async function run() {
     try {
         console.log('🚀 Starting Gemini File Search RAG implementation...\n');
 
-        // Step 1: Create a file search store
-        console.log('📦 Creating file search store...');
-        const fileSearchStore = await ai.fileSearchStores.create({
-            config: { displayName: 'ai-knowledge-base-store' }
-        });
-        console.log(`✅ File search store created: ${fileSearchStore.name}\n`);
-
-        // Step 2: Upload sample.txt to the file search store
-        const sampleFilePath = path.join(__dirname, 'sample.txt');
-
-        if (!fs.existsSync(sampleFilePath)) {
-            throw new Error(`Sample file not found at ${sampleFilePath}`);
-        }
-
-        console.log('📤 Uploading sample.txt to file search store...');
-        let operation = await ai.fileSearchStores.uploadToFileSearchStore({
-            file: sampleFilePath,
-            fileSearchStoreName: fileSearchStore.name,
-            config: {
-                displayName: 'ai-knowledge-base',
-            }
-        });
-
-        // Step 3: Wait for the upload and indexing operation to complete
-        console.log('⏳ Waiting for file indexing to complete...');
-        while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            operation = await ai.operations.get({ operation });
-            process.stdout.write('.');
-        }
-        console.log('\n✅ File indexed successfully!\n');
+        // Get or create file search store (uses cached store name if available)
+        const fileSearchStoreName = await getOrCreateFileSearchStore();
 
         // Step 4: Ask questions based on the sample.txt content
         const questions = [
@@ -65,7 +120,7 @@ async function run() {
                     tools: [
                         {
                             fileSearch: {
-                                fileSearchStoreNames: [fileSearchStore.name]
+                                fileSearchStoreNames: [fileSearchStoreName]
                             }
                         }
                     ]
@@ -73,6 +128,16 @@ async function run() {
             });
 
             console.log(`💡 Answer:\n${response.text}\n`);
+
+            // Display citations if available (as per documentation)
+            if (response.candidates?.[0]?.groundingMetadata) {
+                console.log('📚 Citations available in groundingMetadata');
+                const citations = response.candidates[0].groundingMetadata;
+                if (citations.groundingChunks && citations.groundingChunks.length > 0) {
+                    console.log(`   Found ${citations.groundingChunks.length} relevant chunk(s)\n`);
+                }
+            }
+
             console.log('-'.repeat(80));
         }
 
